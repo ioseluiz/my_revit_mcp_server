@@ -281,6 +281,85 @@ async def inventario_por_familia(categoria: str) -> str:
 
     except Exception as e:
         return f"Error generando inventario: {str(e)}"
+    
+
+@mcp.tool()
+async def obtener_informacion_ejes() -> str:
+    """
+    Obtiene la lista de ejes (grids) existentes en el modelo junto con sus coordenadas de inicio y fin en metros.
+    Útil para identificar intersecciones y saber dónde colocar elementos estructurales como zapatas o columnas.
+    """
+    try:
+        async with httpx.AsyncClient() as client:
+            payload = {
+                "Command": "get_grids_info",
+                "Payload": {} # No necesitamos enviarle datos
+            }
+            resp = await client.post(REVIT_BRIDGE_URL, json=payload, timeout=30.0)
+            resp.raise_for_status()
+            
+            data = resp.json()
+            
+            if isinstance(data, dict) and "error" in data:
+                return f"❌ Error desde Revit: {data['error']}"
+                
+            if not data:
+                return "No se encontraron ejes (grids) en el proyecto actual."
+            
+            texto = "📐 **Información de Ejes (Grids) Existentes:**\n"
+            for item in data:
+                if "StartP_M" in item:
+                    x1, y1 = item['StartP_M']['X'], item['StartP_M']['Y']
+                    x2, y2 = item['EndP_M']['X'], item['EndP_M']['Y']
+                    texto += f"🔹 Eje '{item['Nombre']}': Inicio ({x1}, {y1}) ➔ Fin ({x2}, {y2}) [metros]\n"
+                else:
+                    texto += f"🔹 Eje '{item['Nombre']}': {item.get('Info', 'Geometría curva/no soportada')}\n"
+            
+            return texto
+
+    except httpx.ReadTimeout:
+        return "⚠️ Error: Revit tardó demasiado en responder (Timeout). Asegúrate de no tener ninguna ventana de diálogo abierta en Revit ni estar a la mitad de un comando."
+    except Exception as e:
+        return f"Error obteniendo información de ejes: {str(e) or 'Desconexión de red'}"
+    
+
+@mcp.tool()
+async def obtener_informacion_niveles() -> str:
+    """
+    Obtiene la lista de niveles existentes en el proyecto de Revit con su elevación en metros.
+    Útil para saber a qué alturas referenciar columnas, muros, zapatas o losas.
+    """
+    try:
+        async with httpx.AsyncClient() as client:
+            payload = {
+                "Command": "get_levels_info",
+                "Payload": {} # No requiere datos de entrada
+            }
+            resp = await client.post(REVIT_BRIDGE_URL, json=payload, timeout=30.0)
+            resp.raise_for_status()
+            
+            data = resp.json()
+            
+            if isinstance(data, dict) and "error" in data:
+                return f"❌ Error desde Revit: {data['error']}"
+                
+            if not data:
+                return "No se encontraron niveles en el proyecto actual."
+            
+            # Ordenamos los niveles por elevación (de más bajo a más alto)
+            data_ordenada = sorted(data, key=lambda x: x.get('ElevacionM', 0))
+            
+            texto = "📏 **Información de Niveles Existentes:**\n"
+            for item in data_ordenada:
+                texto += f"🔹 {item['Nombre']}: Elevación {item['ElevacionM']} m (ID: {item['Id']})\n"
+            
+            return texto
+
+    except httpx.ReadTimeout:
+        return "⚠️ Error: Revit tardó demasiado en responder (Timeout). Asegúrate de no tener ninguna ventana abierta en Revit."
+    except Exception as e:
+        return f"Error obteniendo información de niveles: {str(e)}"
+    
 ####################################################################################################
 ## Tools de Dibujo
 
@@ -382,6 +461,63 @@ async def crear_ejes(ejes_verticales: List[Dict[str, Any]], ejes_horizontales: L
 
     except Exception as e:
         return f"Error de conexión al crear ejes: {str(e)}"
+
+
+@mcp.tool()
+async def insertar_zapatas_aisladas(familia: str, tipo: str, nivel: str, zapatas: List[Dict[str, float]], usar_elevacion_fondo: bool = True) -> str:
+    """
+    Inserta zapatas aisladas (Isolated Footings) en coordenadas específicas de Revit.
+    
+    Args:
+        familia: Nombre exacto de la familia en Revit (ej. "Zapata rectangular" o "M_Zapata rectangular").
+        tipo: Nombre exacto del tipo en Revit (ej. "1800 x 1200 x 450 mm").
+        nivel: Nombre del nivel de referencia (ej. "Nivel 1").
+        zapatas: Lista de coordenadas. Ej: [{"x": 0.0, "y": 0.0, "offset_z": -1.50}, {"x": 5.0, "y": 0.0, "offset_z": -1.50}]
+        usar_elevacion_fondo: Si es True, el 'offset_z' indica la elevación del FONDO de la zapata. 
+                              El sistema leerá el grosor de la zapata y ajustará la inserción automáticamente.
+    """
+    if not zapatas:
+        return "Error: No se proporcionaron coordenadas para las zapatas."
+
+    try:
+        async with httpx.AsyncClient() as client:
+            payload = {
+                "Command": "insert_isolated_footings",
+                "Payload": {
+                    "familia": familia,
+                    "tipo": tipo,
+                    "nivel": nivel,
+                    "zapatas": zapatas,
+                    "usar_elevacion_fondo": usar_elevacion_fondo
+                }
+            }
+            resp = await client.post(REVIT_BRIDGE_URL, json=payload, timeout=180.0)
+            resp.raise_for_status()
+            
+            data = resp.json()
+            
+            # Chequeo si el servidor de C# envió un error general (ej: familia no encontrada)
+            if isinstance(data, dict) and "error" in data:
+                return f"❌ Error desde Revit: {data['error']}"
+            
+            texto = f"✅ **Resultado de Inserción de Zapatas '{tipo}':**\n"
+            creados = [x for x in data if x.get("Estado") == "Creado"]
+            errores = [x for x in data if x.get("Estado") != "Creado"]
+            
+            if creados:
+                texto += f"✨ Se insertaron {len(creados)} zapatas correctamente.\n"
+                
+            if errores:
+                texto += "\n⚠️ **Errores:**\n"
+                for err in errores:
+                    texto += f"- En ({err.get('X')}, {err.get('Y')}): {err.get('Mensaje')}\n"
+            
+            return texto
+
+    except httpx.ReadTimeout:
+        return "Error: Revit tardó demasiado en responder (Timeout). Revisa si hay alguna ventana emergente bloqueando Revit."
+    except Exception as e:
+        return f"Error de conexión al insertar zapatas: {str(e) or 'Error desconocido.'}"
 
 # Iniciar el servidor
 if __name__ == "__main__":

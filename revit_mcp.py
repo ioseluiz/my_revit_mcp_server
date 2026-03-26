@@ -519,6 +519,97 @@ async def insertar_zapatas_aisladas(familia: str, tipo: str, nivel: str, zapatas
     except Exception as e:
         return f"Error de conexión al insertar zapatas: {str(e) or 'Error desconocido.'}"
 
+@mcp.tool()
+async def obtener_computo_materiales(categorias: List[str]) -> str:
+    """
+    Extrae un listado detallado de materiales, áreas (m2) y volúmenes (m3) por elemento.
+    Útil para el departamento de estimación de costos (Takeoff).
+    
+    Args:
+        categorias: Lista de categorías a analizar. 
+                   Opciones: ['muros', 'pisos', 'vigas', 'columnas', 'cimentacion', 'techos'].
+    """
+    mapa = {
+        "muros": "OST_Walls",
+        "pisos": "OST_Floors",
+        "vigas": "OST_StructuralFraming",
+        "columnas": "OST_StructuralColumns",
+        "cimentacion": "OST_StructuralFoundation",
+        "techos": "OST_Roofs"
+    }
+    
+    cats_to_send = [mapa[c.lower()] for c in categorias if c.lower() in mapa]
+    
+    if not cats_to_send:
+        return "Error: Debes proporcionar al menos una categoría válida (muros, pisos, etc.)."
+
+    try:
+        async with httpx.AsyncClient() as client:
+            payload = {
+                "Command": "get_material_takeoff",
+                "Payload": { "categories": cats_to_send }
+            }
+            resp = await client.post(REVIT_BRIDGE_URL, json=payload, timeout=90.0)
+            resp.raise_for_status()
+            
+            data = resp.json()
+            if not data:
+                return "No se encontraron materiales calculables en las categorías seleccionadas."
+            
+            # Formateo de reporte para Estimación
+            texto = "📋 **Reporte de Cómputo de Materiales (Takeoff)**\n"
+            texto += "--------------------------------------------------\n"
+            
+            for item in data:
+                texto += f"🏗️ **{item['Category']} (ID: {item['Id']})**: {item['ElementName']}\n"
+                for mat in item['Materials']:
+                    texto += f"   - 🧱 {mat['MaterialName']}: {mat['AreaM2']} m² | {mat['VolumeM3']} m³\n"
+                texto += "\n"
+                
+            return texto
+
+    except Exception as e:
+        return f"Error obteniendo cómputo de materiales: {str(e)}"
+
+@mcp.tool()
+async def obtener_resumen_puertas_ventanas() -> str:
+    """
+    Obtiene un resumen cuantitativo detallado de todas las puertas y ventanas del modelo,
+    agrupadas por familia, tipo y dimensiones.
+    """
+    try:
+        async with httpx.AsyncClient() as client:
+            payload = {
+                "Command": "get_doors_windows_summary",
+                "Payload": {}
+            }
+            resp = await client.post(REVIT_BRIDGE_URL, json=payload, timeout=45.0)
+            resp.raise_for_status()
+            
+            data = resp.json()
+            
+            texto = "🪟 **Resumen de Puertas y Ventanas**\n"
+            texto += "--------------------------------------------------\n"
+            
+            for cat, families in data.items():
+                cat_emoji = "🚪" if "Doors" in cat else "🖼️"
+                texto += f"\n{cat_emoji} **Categoría: {cat}**\n"
+                
+                if not families:
+                    texto += "   (No se encontraron elementos)\n"
+                    continue
+                    
+                for fam in families:
+                    texto += f"   🔹 **Familia: {fam['FamilyName']}**\n"
+                    for t in fam['Types']:
+                        dim_text = f" [{t['Dimensions']}]" if t['Dimensions'] != "N/A" else ""
+                        texto += f"      - {t['TypeName']}{dim_text}: **{t['Count']}** unidades\n"
+            
+            return texto
+
+    except Exception as e:
+        return f"Error obteniendo resumen de puertas y ventanas: {str(e)}"
+
 # Iniciar el servidor
 if __name__ == "__main__":
     mcp.run()
